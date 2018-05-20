@@ -13,6 +13,7 @@ export default class Gantt {
         this.setup_tasks(tasks);
         // initialize with default view mode
         this.change_view_mode();
+        this.change_popup_mode();
         this.bind_events();
     }
 
@@ -47,13 +48,14 @@ export default class Gantt {
             header_height: 50,
             column_width: 30,
             step: 24,
-            view_modes: ['Hour', 'Quarter Day', 'Half Day', 'Day', 'Week', 'Month'],
+            view_modes: ['Quarter Day', 'Half Day', 'Day', 'Week', 'Month'],
             bar_height: 20,
             bar_corner_radius: 3,
             arrow_curve: 5,
             padding: 18,
             view_mode: 'Day',
             date_format: 'YYYY-MM-DD',
+            popup_trigger: 'click',
             custom_popup_html: null
         };
         this.options = Object.assign({}, default_options, options);
@@ -87,6 +89,13 @@ export default class Gantt {
 
             if (task.start && !task.end) {
                 task._end = date_utils.add(task._start, 2, 'day');
+            }
+
+            // if hours is not set, assume the last day is full day
+            // e.g: 2018-09-09 becomes 2018-09-09 23:59:59
+            const task_end_values = date_utils.get_date_values(task._end);
+            if (task_end_values.slice(3).every(d => d === 0)) {
+                task._end = date_utils.add(task._end, 24, 'hour');
             }
 
             // invalid flag
@@ -132,6 +141,12 @@ export default class Gantt {
         this.change_view_mode();
     }
 
+    change_popup_mode(mode = this.options.popup_trigger){
+        this.options.popup_trigger = mode;
+        this.grid_event();
+        this.render();
+    }
+
     change_view_mode(mode = this.options.view_mode) {
         this.update_view_scale(mode);
         this.setup_dates();
@@ -143,10 +158,7 @@ export default class Gantt {
     update_view_scale(view_mode) {
         this.options.view_mode = view_mode;
 
-        if (view_mode === 'Hour') {
-            this.options.step = 24 / 24;
-            this.options.column_width = 38;
-        } else if (view_mode === 'Day') {
+        if (view_mode === 'Day') {
             this.options.step = 24;
             this.options.column_width = 38;
         } else if (view_mode === 'Half Day') {
@@ -182,8 +194,11 @@ export default class Gantt {
             }
         }
 
+        this.gantt_start = date_utils.start_of(this.gantt_start, 'day');
+        this.gantt_end = date_utils.start_of(this.gantt_end, 'day');
+
         // add date padding on both sides
-        if (this.view_is(['Hour' ,'Quarter Day', 'Half Day'])) {
+        if (this.view_is(['Quarter Day', 'Half Day'])) {
             this.gantt_start = date_utils.add(this.gantt_start, -7, 'day');
             this.gantt_end = date_utils.add(this.gantt_end, 7, 'day');
         } else if (this.view_is('Month')) {
@@ -212,7 +227,6 @@ export default class Gantt {
     }
 
     bind_events() {
-        this.bind_grid_click();
         this.bind_bar_events();
     }
 
@@ -430,7 +444,6 @@ export default class Gantt {
             last_date = date_utils.add(date, 1, 'year');
         }
         const date_text = {
-            'Hour_lower': date_utils.format(date, 'HH'),
             'Quarter Day_lower': date_utils.format(date, 'HH'),
             'Half Day_lower': date_utils.format(date, 'HH'),
             Day_lower:
@@ -442,12 +455,6 @@ export default class Gantt {
                     ? date_utils.format(date, 'D MMM')
                     : date_utils.format(date, 'D'),
             Month_lower: date_utils.format(date, 'MMMM'),
-            'Hour_upper':
-                date.getDate() !== last_date.getDate()
-                    ? date.getMonth() !== last_date.getMonth()
-                      ? date_utils.format(date, 'D MMM')
-                      : date_utils.format(date, 'D')
-                    : '',
             'Quarter Day_upper':
                 date.getDate() !== last_date.getDate()
                     ? date_utils.format(date, 'D MMM')
@@ -479,8 +486,6 @@ export default class Gantt {
         };
 
         const x_pos = {
-            'Hour_lower': this.options.column_width * 2 / 2,
-            'Hour_upper': 0,
             'Quarter Day_lower': this.options.column_width * 4 / 2,
             'Quarter Day_upper': 0,
             'Half Day_lower': this.options.column_width * 2 / 2,
@@ -572,11 +577,11 @@ export default class Gantt {
         parent_element.scrollLeft = scroll_pos;
     }
 
-    bind_grid_click() {
-        this.layers.grid.onclick = () => {
+    grid_event() {
+        $.on(this.$svg, this.options.popup_trigger, '.grid-row, .grid-header', () => {
             this.unselect_all();
             this.hide_popup();
-        };
+        });
     }
 
     bind_bar_events() {
@@ -593,44 +598,39 @@ export default class Gantt {
             return is_dragging || is_resizing_left || is_resizing_right;
         }
 
-        $.on(
-            this.layers.bar,
-            'mousedown',
-            '.bar-wrapper, .handle',
-            (e, element) => {
-                const bar_wrapper = $.closest('.bar-wrapper', element);
+        $.on(this.$svg, 'mousedown', '.bar-wrapper, .handle', (e, element) => {
+            const bar_wrapper = $.closest('.bar-wrapper', element);
 
-                if (element.classList.contains('left')) {
-                    is_resizing_left = true;
-                } else if (element.classList.contains('right')) {
-                    is_resizing_right = true;
-                } else if (element.classList.contains('bar-wrapper')) {
-                    is_dragging = true;
-                }
-
-                bar_wrapper.classList.add('active');
-
-                x_on_start = e.offsetX;
-                y_on_start = e.offsetY;
-
-                parent_bar_id = bar_wrapper.getAttribute('data-id');
-                const ids = [
-                    parent_bar_id,
-                    ...this.get_all_dependent_tasks(parent_bar_id)
-                ];
-                bars = ids.map(id => this.get_bar(id));
-
-                this.bar_being_dragged = parent_bar_id;
-
-                bars.forEach(bar => {
-                    const $bar = bar.$bar;
-                    $bar.ox = $bar.getX();
-                    $bar.oy = $bar.getY();
-                    $bar.owidth = $bar.getWidth();
-                    $bar.finaldx = 0;
-                });
+            if (element.classList.contains('left')) {
+                is_resizing_left = true;
+            } else if (element.classList.contains('right')) {
+                is_resizing_right = true;
+            } else if (element.classList.contains('bar-wrapper')) {
+                is_dragging = true;
             }
-        );
+
+            bar_wrapper.classList.add('active');
+
+            x_on_start = e.offsetX;
+            y_on_start = e.offsetY;
+
+            parent_bar_id = bar_wrapper.getAttribute('data-id');
+            const ids = [
+                parent_bar_id,
+                ...this.get_all_dependent_tasks(parent_bar_id)
+            ];
+            bars = ids.map(id => this.get_bar(id));
+
+            this.bar_being_dragged = parent_bar_id;
+
+            bars.forEach(bar => {
+                const $bar = bar.$bar;
+                $bar.ox = $bar.getX();
+                $bar.oy = $bar.getY();
+                $bar.owidth = $bar.getWidth();
+                $bar.finaldx = 0;
+            });
+        });
 
         $.on(this.$svg, 'mousemove', e => {
             if (!action_in_progress()) return;
@@ -820,7 +820,10 @@ export default class Gantt {
 
     show_popup(options) {
         if (!this.popup) {
-            this.popup = new Popup(this.popup_wrapper);
+            this.popup = new Popup(
+                this.popup_wrapper,
+                this.options.custom_popup_html
+            );
         }
         this.popup.show(options);
     }
